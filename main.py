@@ -11,7 +11,13 @@ from scipy.stats import norm
 from scipy.optimize import brentq
 import os
 from dotenv import load_dotenv
-
+import matplotlib.pyplot as plt
+# --------- Plotting Utility ---------
+import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
+import matplotlib.cm as cm
+from matplotlib.collections import LineCollection
+import numpy as np
 # Load environment variables
 load_dotenv()
 
@@ -106,91 +112,6 @@ def prepare_option_greeks(und_df, opt_df, option_symbol, r=0.06, q=0.0, expiry_t
     merged["iv"]=ivs; merged["delta"]=deltas; merged["gamma"]=gammas; merged["theta"]=thetas; merged["vega"]=vegas; merged["rho"]=rhos
     return merged
 
-# --------- Backtest engine for Gamma-Scalp ----------
-def backtest_gamma_scalp(und_df, opt_df, option_symbol, rebalance_minutes=1, entry_qty=1, max_notional=1_000_000,
-                         fee_per_contract=None, slippage_ticks=None, tick_size=None, r=None):
-    """
-    - Buy 'entry_qty' option contracts at time 0 (first interval) and delta-hedge immediately.
-    - Rebalance underlying hedge every 'rebalance_minutes'.
-    - Track P&L from options (marked to market) and underlying hedge trading.
-    """
-    # Use environment defaults if parameters not provided
-    if fee_per_contract is None:
-        fee_per_contract = DEFAULT_FEE_PER_CONTRACT
-    if slippage_ticks is None:
-        slippage_ticks = DEFAULT_SLIPPAGE_TICKS
-    if tick_size is None:
-        tick_size = DEFAULT_TICK_SIZE
-    if r is None:
-        r = RISK_FREE_RATE
-    
-    # prepare greeks
-    merged = prepare_option_greeks(und_df,opt_df,option_symbol,r=r)
-    if merged.empty:
-        return None
-    merged = merged.set_index("interval_start")
-    # initial position: buy entry_qty contracts
-    qty_opts = entry_qty  # positive means long options
-    lot_multiplier = DEFAULT_LOT_SIZE  # lot size from environment
-    contracts = qty_opts
-    # bookkeeping
-    cash = 0.0
-    underlying_pos = 0.0
-    pnl_hist=[]
-    last_rebalance_time = None
-    for t, row in merged.iterrows():
-        # mark option position
-        mtm_options = contracts * row["option_price"] * lot_multiplier * 1.0  # option price in points * multiplier
-        # compute desired hedge to neutralize delta: hedge units = contracts * delta * lot_multiplier
-        if np.isnan(row["delta"]):
-            desired_hedge = 0.0
-        else:
-            desired_hedge = - contracts * row["delta"] * lot_multiplier  # negative: short underlying
-        # rebalancing rule: time-based
-        if last_rebalance_time is None or (t - last_rebalance_time) >= pd.Timedelta(minutes=rebalance_minutes):
-            # trade underlying to desired_hedge
-            trade_size = desired_hedge - underlying_pos
-            if abs(trade_size) > 0:
-                # trade price: approximate using underlying close price with slippage
-                trade_price = row["underlying"] + slippage_ticks * tick_size * np.sign(trade_size)
-                trade_cost = trade_price * trade_size
-                # fees
-                fees = fee_per_contract * abs(trade_size)/lot_multiplier  # scale fee to contracts
-                cash -= trade_cost + fees
-                underlying_pos = desired_hedge
-            last_rebalance_time = t
-        # portfolio mark-to-market
-        mtm_underlying = underlying_pos * row["underlying"]
-        total_mv = mtm_options + mtm_underlying + cash
-        # store metrics
-        pnl_hist.append({
-            "timestamp": t, "option_price": row["option_price"], "iv": row["iv"],
-            "contracts": contracts, "delta": row["delta"], "gamma": row["gamma"],
-            "underlying_pos": underlying_pos, "mv_options": mtm_options, "mv_underlying": mtm_underlying,
-            "portfolio_value": total_mv
-        })
-    df_pnl = pd.DataFrame(pnl_hist).set_index("timestamp")
-    # compute returns
-    df_pnl["pnl_change"] = df_pnl["portfolio_value"].diff().fillna(0)
-    total_pnl = df_pnl["pnl_change"].sum()
-    return {"pnl_timeseries": df_pnl, "total_pnl": total_pnl}
-
-# --------- Example run ----------
-# if __name__=="__main__":
-#     START = "2025-09-05T03:45:00.000Z";
-#     END   = "2025-09-06T04:15:00.000Z";
-#     und = fetch_ohlcv("NIFTY-I", START, END)
-#     opt = fetch_ohlcv("NIFTY25090924900PE", START, END)
-#     res = backtest_gamma_scalp(und,opt,"NIFTY25090924900PE", rebalance_minutes=1, entry_qty=1)
-#     print("Total P&L:", res["total_pnl"])
-#     print(res["pnl_timeseries"])
-
-
-
-import matplotlib.pyplot as plt
-
-# --------- Backtest engine for Gamma-Scalp (unchanged above) ---------
-
 def backtest_gamma_scalp(und_df, opt_df, option_symbol, rebalance_minutes=1, entry_qty=1, max_notional=1_000_000,
                          fee_per_contract=None, slippage_ticks=None, tick_size=None, r=None):
     # Use environment defaults if parameters not provided
@@ -259,12 +180,7 @@ def backtest_gamma_scalp(und_df, opt_df, option_symbol, rebalance_minutes=1, ent
     total_pnl = df_pnl["cum_pnl"].iloc[-1]
     return {"pnl_timeseries": df_pnl, "total_pnl": total_pnl}
 
-# --------- Plotting Utility ---------
-import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
-import matplotlib.cm as cm
-from matplotlib.collections import LineCollection
-import numpy as np
+
 
 def plot_colored_line(ax, x, y, cmap="viridis", label=None):
     """
