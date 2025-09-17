@@ -1,5 +1,5 @@
 # Simplified backtester for Delta-hedged Gamma-Scalping
-# Requirements: pandas, numpy, requests, scipy, pytz
+# Requirements: pandas, numpy, requests, scipy, pytz, python-dotenv
 
 import pandas as pd
 import numpy as np
@@ -9,10 +9,29 @@ from datetime import datetime, timedelta
 import pytz
 from scipy.stats import norm
 from scipy.optimize import brentq
+import os
+from dotenv import load_dotenv
 
-# --------- Insert your API details ----------
-API_OHLCV = "https://api.futprint.in/api/historical-data-ohlcv-oi"
-HEADERS = {"authorization": "Bearer <YOUR_TOKEN>", "x-admin-api-key": "FutPrintIN", "accept":"*/*"}
+# Load environment variables
+load_dotenv()
+
+# --------- API Configuration from Environment ----------
+API_OHLCV = os.getenv("API_OHLCV_URL", "https://api.futprint.in/api/historical-data-ohlcv-oi")
+API_TOKEN = os.getenv("API_TOKEN", "<YOUR_TOKEN>")
+API_KEY = os.getenv("API_KEY", "FutPrintIN")
+
+HEADERS = {
+    "authorization": f"Bearer {API_TOKEN}",
+    "x-admin-api-key": API_KEY,
+    "accept": "*/*"
+}
+
+# Trading configuration from environment
+RISK_FREE_RATE = float(os.getenv("RISK_FREE_RATE", "0.06"))
+DEFAULT_LOT_SIZE = int(os.getenv("DEFAULT_LOT_SIZE", "50"))
+DEFAULT_FEE_PER_CONTRACT = float(os.getenv("DEFAULT_FEE_PER_CONTRACT", "10.0"))
+DEFAULT_SLIPPAGE_TICKS = int(os.getenv("DEFAULT_SLIPPAGE_TICKS", "1"))
+DEFAULT_TICK_SIZE = float(os.getenv("DEFAULT_TICK_SIZE", "1.0"))
 
 # --------- Utility BS & IV (vectorizable approach) ----------
 def bs_price_vec(opt_type, S, K, T, r, sigma, q=0.0):
@@ -89,12 +108,22 @@ def prepare_option_greeks(und_df, opt_df, option_symbol, r=0.06, q=0.0, expiry_t
 
 # --------- Backtest engine for Gamma-Scalp ----------
 def backtest_gamma_scalp(und_df, opt_df, option_symbol, rebalance_minutes=1, entry_qty=1, max_notional=1_000_000,
-                         fee_per_contract=10.0, slippage_ticks=1, tick_size=1.0, r=0.06):
+                         fee_per_contract=None, slippage_ticks=None, tick_size=None, r=None):
     """
     - Buy 'entry_qty' option contracts at time 0 (first interval) and delta-hedge immediately.
     - Rebalance underlying hedge every 'rebalance_minutes'.
     - Track P&L from options (marked to market) and underlying hedge trading.
     """
+    # Use environment defaults if parameters not provided
+    if fee_per_contract is None:
+        fee_per_contract = DEFAULT_FEE_PER_CONTRACT
+    if slippage_ticks is None:
+        slippage_ticks = DEFAULT_SLIPPAGE_TICKS
+    if tick_size is None:
+        tick_size = DEFAULT_TICK_SIZE
+    if r is None:
+        r = RISK_FREE_RATE
+    
     # prepare greeks
     merged = prepare_option_greeks(und_df,opt_df,option_symbol,r=r)
     if merged.empty:
@@ -102,7 +131,7 @@ def backtest_gamma_scalp(und_df, opt_df, option_symbol, rebalance_minutes=1, ent
     merged = merged.set_index("interval_start")
     # initial position: buy entry_qty contracts
     qty_opts = entry_qty  # positive means long options
-    lot_multiplier = 50  # example NIFTY lot size; replace with correct
+    lot_multiplier = DEFAULT_LOT_SIZE  # lot size from environment
     contracts = qty_opts
     # bookkeeping
     cash = 0.0
@@ -163,13 +192,23 @@ import matplotlib.pyplot as plt
 # --------- Backtest engine for Gamma-Scalp (unchanged above) ---------
 
 def backtest_gamma_scalp(und_df, opt_df, option_symbol, rebalance_minutes=1, entry_qty=1, max_notional=1_000_000,
-                         fee_per_contract=10.0, slippage_ticks=1, tick_size=1.0, r=0.06):
+                         fee_per_contract=None, slippage_ticks=None, tick_size=None, r=None):
+    # Use environment defaults if parameters not provided
+    if fee_per_contract is None:
+        fee_per_contract = DEFAULT_FEE_PER_CONTRACT
+    if slippage_ticks is None:
+        slippage_ticks = DEFAULT_SLIPPAGE_TICKS
+    if tick_size is None:
+        tick_size = DEFAULT_TICK_SIZE
+    if r is None:
+        r = RISK_FREE_RATE
+        
     merged = prepare_option_greeks(und_df,opt_df,option_symbol,r=r)
     if merged.empty:
         return None
     merged = merged.set_index("interval_start")
     qty_opts = entry_qty
-    lot_multiplier = 50  # Example lot size
+    lot_multiplier = DEFAULT_LOT_SIZE  # lot size from environment
     contracts = qty_opts
     cash = 0.0
     underlying_pos = 0.0
