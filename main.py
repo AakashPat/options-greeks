@@ -35,6 +35,7 @@ HEADERS = {
 # Trading configuration from environment
 RISK_FREE_RATE = float(os.getenv("RISK_FREE_RATE", "0.06"))
 DEFAULT_LOT_SIZE = int(os.getenv("DEFAULT_LOT_SIZE", "50"))
+DEFAULT_UNDERLYING_LOT_SIZE = int(os.getenv("DEFAULT_UNDERLYING_LOT_SIZE", "75"))  # NIFTY-I lot size
 DEFAULT_FEE_PER_CONTRACT = float(os.getenv("DEFAULT_FEE_PER_CONTRACT", "10.0"))
 DEFAULT_SLIPPAGE_TICKS = int(os.getenv("DEFAULT_SLIPPAGE_TICKS", "1"))
 DEFAULT_TICK_SIZE = float(os.getenv("DEFAULT_TICK_SIZE", "1.0"))
@@ -112,8 +113,42 @@ def prepare_option_greeks(und_df, opt_df, option_symbol, r=0.06, q=0.0, expiry_t
     merged["iv"]=ivs; merged["delta"]=deltas; merged["gamma"]=gammas; merged["theta"]=thetas; merged["vega"]=vegas; merged["rho"]=rhos
     return merged
 
+# --------- Realistic Lot-Based Hedging Utilities ----------
+def calculate_realistic_hedge(option_contracts, delta, option_lot_size, underlying_lot_size):
+    """
+    Calculate realistic hedge position considering lot size constraints.
+    
+    Args:
+        option_contracts: Number of option contracts held
+        delta: Option delta
+        option_lot_size: Size of one option contract (e.g., 75 for NIFTY)
+        underlying_lot_size: Size of one underlying contract (e.g., 75 for NIFTY-I)
+    
+    Returns:
+        tuple: (hedge_units, hedge_lots, hedge_efficiency)
+    """
+    # Calculate ideal hedge in units
+    ideal_hedge_units = -option_contracts * delta * option_lot_size
+    
+    # Calculate how many underlying lots needed
+    ideal_hedge_lots = ideal_hedge_units / underlying_lot_size
+    
+    # Round to nearest whole lot (realistic constraint)
+    actual_hedge_lots = round(ideal_hedge_lots)
+    
+    # Convert back to units
+    actual_hedge_units = actual_hedge_lots * underlying_lot_size
+    
+    # Calculate hedging efficiency
+    if ideal_hedge_units != 0:
+        hedge_efficiency = abs(actual_hedge_units / ideal_hedge_units)
+    else:
+        hedge_efficiency = 1.0
+    
+    return actual_hedge_units, actual_hedge_lots, hedge_efficiency
+
 def backtest_gamma_scalp(und_df, opt_df, option_symbol, rebalance_minutes=1, entry_qty=1, max_notional=1_000_000,
-                         fee_per_contract=None, slippage_ticks=None, tick_size=None, r=None):
+                         fee_per_contract=None, slippage_ticks=None, tick_size=None, r=None, underlying_lot_size=None):
     # Use environment defaults if parameters not provided
     if fee_per_contract is None:
         fee_per_contract = DEFAULT_FEE_PER_CONTRACT
@@ -123,34 +158,54 @@ def backtest_gamma_scalp(und_df, opt_df, option_symbol, rebalance_minutes=1, ent
         tick_size = DEFAULT_TICK_SIZE
     if r is None:
         r = RISK_FREE_RATE
+    if underlying_lot_size is None:
+        underlying_lot_size = DEFAULT_UNDERLYING_LOT_SIZE
         
     merged = prepare_option_greeks(und_df,opt_df,option_symbol,r=r)
     if merged.empty:
         return None
     merged = merged.set_index("interval_start")
     qty_opts = entry_qty
-    lot_multiplier = DEFAULT_LOT_SIZE  # lot size from environment
+    lot_multiplier = DEFAULT_LOT_SIZE  # option lot size from environment
     contracts = qty_opts
+    
+    # bookkeeping
     cash = 0.0
-    underlying_pos = 0.0
+    underlying_pos = 0.0  # in units
+    underlying_lots = 0   # in lots (for tracking)
     pnl_hist=[]
     last_rebalance_time = None
 
     for t, row in merged.iterrows():
         mtm_options = contracts * row["option_price"] * lot_multiplier
+        # Calculate realistic hedge using lot constraints
         if np.isnan(row["delta"]):
-            desired_hedge = 0.0
+            desired_hedge_units = 0.0
+            desired_hedge_lots = 0
+            hedge_efficiency = 1.0
         else:
-            desired_hedge = - contracts * row["delta"] * lot_multiplier
+            desired_hedge_units, desired_hedge_lots, hedge_efficiency = calculate_realistic_hedge(
+                contracts, row["delta"], lot_multiplier, underlying_lot_size
+            )
 
         if last_rebalance_time is None or (t - last_rebalance_time) >= pd.Timedelta(minutes=rebalance_minutes):
-            trade_size = desired_hedge - underlying_pos
-            if abs(trade_size) > 0:
-                trade_price = row["underlying"] + slippage_ticks * tick_size * np.sign(trade_size)
-                trade_cost = trade_price * trade_size
-                fees = fee_per_contract * abs(trade_size)/lot_multiplier
+            # Calculate trade size in units and lots
+            trade_size_units = desired_hedge_units - underlying_pos
+            trade_size_lots = desired_hedge_lots - underlying_lots
+            
+            if abs(trade_size_units) > 0:
+                # Execute trade with slippage
+                trade_price = row["underlying"] + slippage_ticks * tick_size * np.sign(trade_size_units)
+                trade_cost = trade_price * trade_size_units
+                
+                # Calculate fees based on lots traded
+                fees = fee_per_contract * abs(trade_size_lots)
+                
+                # Update positions
                 cash -= trade_cost + fees
-                underlying_pos = desired_hedge
+                underlying_pos = desired_hedge_units
+                underlying_lots = desired_hedge_lots
+                
             last_rebalance_time = t
 
         mtm_underlying = underlying_pos * row["underlying"]
@@ -168,6 +223,9 @@ def backtest_gamma_scalp(und_df, opt_df, option_symbol, rebalance_minutes=1, ent
             "vega": row["vega"],
             "rho": row["rho"],
             "underlying_pos": underlying_pos,
+            "underlying_lots": underlying_lots,
+            "hedge_efficiency": hedge_efficiency,
+            "ideal_hedge": -contracts * row["delta"] * lot_multiplier if not np.isnan(row["delta"]) else 0,
             "mv_options": mtm_options,
             "mv_underlying": mtm_underlying,
             "cash": cash,
@@ -208,7 +266,7 @@ def plot_colored_line(ax, x, y, cmap="viridis", label=None):
 
 
 def plot_results(df):
-    fig, axes = plt.subplots(4, 2, figsize=(15, 12), sharex=True)
+    fig, axes = plt.subplots(5, 2, figsize=(15, 15), sharex=True)
 
     # convert index to numeric for LineCollection
     x = df.index.values.astype(float)  # numeric timestamps
@@ -220,7 +278,9 @@ def plot_results(df):
     plot_colored_line(axes[2,0], x, df["gamma"].values, cmap="magma", label="Gamma")
     plot_colored_line(axes[2,1], x, df["theta"].values, cmap="PuBuGn", label="Theta")
     plot_colored_line(axes[3,0], x, df["vega"].values, cmap="YlGnBu", label="Vega")
-    plot_colored_line(axes[3,1], x, df["cum_pnl"].values, cmap="RdYlGn", label="Cumulative PnL")
+    plot_colored_line(axes[3,1], x, df["hedge_efficiency"].values, cmap="Spectral", label="Hedge Efficiency")
+    plot_colored_line(axes[4,0], x, df["underlying_lots"].values, cmap="Set1", label="Underlying Position (Lots)")
+    plot_colored_line(axes[4,1], x, df["cum_pnl"].values, cmap="RdYlGn", label="Cumulative PnL")
 
     plt.tight_layout()
     plt.show()

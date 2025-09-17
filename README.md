@@ -40,7 +40,8 @@ Create a `.env` file based on `env.example` and configure the following:
 - `API_TOKEN`: Your FutPrint API Bearer token
 - `API_KEY`: Admin API key (usually 'FutPrintIN')
 - `RISK_FREE_RATE`: Risk-free rate for options pricing (default: 0.06)
-- `DEFAULT_LOT_SIZE`: Contract lot size (default: 50 for NIFTY)
+- `DEFAULT_LOT_SIZE`: Option contract lot size (default: 75 for NIFTY)
+- `DEFAULT_UNDERLYING_LOT_SIZE`: Underlying futures lot size (default: 75 for NIFTY-I)
 
 ### Trading Parameters
 
@@ -110,15 +111,42 @@ Example: `NIFTY25090924900PE` = NIFTY Put expiring Sep 9, 2025, strike 24900
 
 ## Strategy Details
 
-### Gamma Scalping
+### Gamma Scalping with Realistic Lot-Based Hedging
 
 The gamma scalping strategy implemented:
 
 1. **Long Option Position**: Buy option contracts at market open
 2. **Delta Hedging**: Maintain delta-neutral position by trading underlying
-3. **Rebalancing**: Adjust hedge position at specified intervals
-4. **P&L Tracking**: Mark-to-market option and hedge positions
-5. **Cost Modeling**: Include transaction fees and slippage
+3. **Lot-Based Constraints**: Realistic hedging limited to whole contract lots
+4. **Rebalancing**: Adjust hedge position at specified intervals
+5. **P&L Tracking**: Mark-to-market option and hedge positions
+6. **Cost Modeling**: Include transaction fees and slippage
+
+### Realistic Hedging Implementation
+
+Unlike theoretical backtests, this implementation accounts for real-world constraints:
+
+#### **Lot Size Constraints**
+- **NIFTY Options**: 75 units per contract
+- **NIFTY-I Futures**: 75 units per contract
+- **Hedging Challenge**: Perfect delta neutrality is impossible with discrete lot sizes
+
+#### **Example Hedging Calculation**
+```python
+# Option Position: 1 contract (75 units) with delta = -0.45
+ideal_hedge = 1 × 0.45 × 75 = 33.75 units  # What we want
+available_lots = [0, 75, 150, ...]          # What we can trade
+actual_hedge = 0 units (0 lots)             # Closest available
+
+hedge_efficiency = |0 / 33.75| = 0%         # Hedging effectiveness
+```
+
+#### **Dynamic Hedge Adjustments**
+The system continuously calculates:
+- **Ideal Hedge**: Perfect delta-neutral position
+- **Actual Hedge**: Rounded to nearest whole lots
+- **Hedge Efficiency**: Ratio of actual vs ideal hedging
+- **Trade Decision**: Only execute if lot change is required
 
 ### Risk Parameters
 
@@ -131,9 +159,10 @@ The gamma scalping strategy implemented:
 
 The backtester generates:
 
-- **Time Series Data**: Complete P&L progression with Greeks
-- **Performance Metrics**: Total P&L, Sharpe ratio, maximum drawdown
-- **Visualizations**: Multi-panel plots showing price action and Greeks
+- **Time Series Data**: Complete P&L progression with Greeks and hedging metrics
+- **Performance Metrics**: Total P&L, hedge efficiency statistics
+- **Hedging Analytics**: Ideal vs actual hedge positions, lot utilization
+- **Visualizations**: Multi-panel plots showing price action, Greeks, and hedge efficiency
 - **CSV Export**: Detailed results for external analysis
 
 ## Dependencies
